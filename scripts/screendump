@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+MONITOR=${MONITOR:-build/qemu-monitor.sock}
+OUT=${1:-build/screen.ppm}
+mkdir -p "$(dirname "$OUT")"
+printf 'screendump %s\n' "$OUT" | socat - "UNIX-CONNECT:$MONITOR" >/dev/null
+echo "$OUT"

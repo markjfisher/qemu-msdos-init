@@ -1,0 +1,14 @@
+/disks/*.img
+/disks/*.zip
+/disks/*.sys
+/disks/*.SYS
+/disks/*.7z
+/disks/nic/*
+!/disks/README.md
+!/disks/.keep
+/build/
+/images/final/*.img
+!/images/final/README.txt
+!/images/final/SHA256SUMS
+__pycache__/
+*.pyc

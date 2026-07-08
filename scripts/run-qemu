@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+IMAGE=${IMAGE:-build/msdos622-cf-2047m.img}
+MEMORY=${MEMORY:-64}
+BOOT=${BOOT:-c}
+FDA=${FDA:-}
+MONITOR=${MONITOR:-build/qemu-monitor.sock}
+USB_DISK=${USB_DISK:-}
+NET=${NET:-user}
+NIC=${NIC:-ne2k_isa}
+DISPLAY_ARGS=()
+
+usage() {
+  cat <<EOF
+Usage: scripts/run-qemu [options]
+
+Options:
+  -i, --image PATH       Raw hard disk image (default: $IMAGE)
+  -f, --fda PATH         Floppy image to insert as A:
+  -b, --boot ORDER       QEMU boot order, usually a or c (default: $BOOT)
+  -m, --memory MB        RAM in MiB (default: $MEMORY)
+  --monitor PATH         QEMU monitor socket (default: $MONITOR)
+  --usb-disk PATH        Optional raw image exposed as a USB mass-storage stick
+  --display ARG          Extra QEMU display argument, e.g. gtk or none
+  -h, --help             Show this help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -i|--image) IMAGE=$2; shift 2 ;;
+    -f|--fda) FDA=$2; shift 2 ;;
+    -b|--boot) BOOT=$2; shift 2 ;;
+    -m|--memory) MEMORY=$2; shift 2 ;;
+    --monitor) MONITOR=$2; shift 2 ;;
+    --usb-disk) USB_DISK=$2; shift 2 ;;
+    --display) DISPLAY_ARGS=(-display "$2"); shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+mkdir -p "$(dirname "$MONITOR")"
+
+args=(
+  -M pc
+  -cpu pentium
+  -m "$MEMORY"
+  -rtc base=localtime
+  -drive "file=$IMAGE,format=raw,if=ide,index=0,media=disk"
+  -boot "$BOOT"
+  -monitor "unix:$MONITOR,server,nowait"
+  -device sb16
+  -netdev "$NET,id=net0"
+)
+
+if [[ "$NIC" == "ne2k_isa" ]]; then
+  args+=(-device ne2k_isa,netdev=net0,iobase=0x300,irq=3)
+else
+  args+=(-device "$NIC,netdev=net0")
+fi
+
+if [[ -n "$FDA" ]]; then
+  args+=(-drive "file=$FDA,format=raw,if=floppy,index=0,media=disk")
+fi
+
+if [[ -n "$USB_DISK" ]]; then
+  args+=(
+    -usb
+    -drive "if=none,id=usbstick,file=$USB_DISK,format=raw,media=disk"
+    -device usb-storage,drive=usbstick
+  )
+fi
+
+if [[ ${#DISPLAY_ARGS[@]} -gt 0 ]]; then
+  args+=("${DISPLAY_ARGS[@]}")
+fi
+
+exec qemu-system-i386 "${args[@]}"

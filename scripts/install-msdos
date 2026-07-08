@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec scripts/run-qemu --boot a --fda "disks/Disk 1 - Setup - 1.44mb.img" "$@"

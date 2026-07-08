@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+MONITOR=${MONITOR:-build/qemu-monitor.sock}
+
+case "${1:-}" in
+  1) disk="disks/Disk 1 - Setup - 1.44mb.img" ;;
+  2) disk="disks/Disk 2 - 1.44mb.img" ;;
+  3) disk="disks/Disk 3 - 1.45mb.img" ;;
+  cdrom) disk="disks/cdrom.img" ;;
+  eject|none)
+    if [[ $# -ge 2 ]]; then
+      MONITOR=$2
+    fi
+    printf 'eject floppy0\n' | socat - "UNIX-CONNECT:$MONITOR"
+    exit 0
+    ;;
+  ""|-h|--help)
+    echo "Usage: scripts/floppy {1|2|3|cdrom|eject} [monitor-socket]" >&2
+    exit 2
+    ;;
+  *) disk="$1" ;;
+esac
+
+if [[ $# -ge 2 ]]; then
+  MONITOR=$2
+fi
+
+escaped=${disk//\\/\\\\}
+escaped=${escaped//\"/\\\"}
+printf 'change floppy0 "%s"\n' "$escaped" | socat - "UNIX-CONNECT:$MONITOR"
