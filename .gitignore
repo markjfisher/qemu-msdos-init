@@ -8,7 +8,10 @@
 !/disks/.keep
 /build/
 /images/final/*.img
+/images/compaq-setup/*
+!/images/compaq-setup/README.txt
 !/images/final/README.txt
 !/images/final/SHA256SUMS
 __pycache__/
 *.pyc
+/downloads/*
