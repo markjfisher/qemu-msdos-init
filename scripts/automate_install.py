@@ -18,8 +18,9 @@ DISKS = ROOT / "disks"
 BUILD = ROOT / "build"
 DEFAULT_IMAGE = BUILD / "msdos622-cf-2047m-auto.img"
 DEFAULT_SIZE_MIB = 2047
+DEFAULT_LAYOUT = "plain"
+DEFAULT_DIAGNOSTICS_SIZE_MIB = 8
 MONITOR = BUILD / "qemu-auto-monitor.sock"
-SECTOR_OFFSET = 1048576
 
 
 def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -140,24 +141,39 @@ def start_qemu(image: Path, *, floppy: Path | None, boot: str) -> subprocess.Pop
     return proc
 
 
-def create_image(image: Path, force: bool, size_mib: int, size_bytes: int | None) -> None:
+def create_image(
+    image: Path,
+    force: bool,
+    size_mib: int,
+    size_bytes: int | None,
+    layout: str,
+    diagnostics_size_mib: int,
+) -> None:
     args = ["scripts/create-image", "-o", str(image)]
     if size_bytes is not None:
         args.extend(["--size-bytes", str(size_bytes)])
     else:
         args.extend(["--size-mib", str(size_mib)])
+    args.extend(["--layout", layout, "--diagnostics-size-mib", str(diagnostics_size_mib)])
     if force:
         args.append("--force")
     subprocess.run(args, cwd=ROOT, check=True)
 
 
-def verify_installed(image: Path) -> None:
-    spec = f"{image}@@{SECTOR_OFFSET}"
+def image_spec(image: Path, dos_partition: int | None) -> str:
+    args = ["python3", "scripts/msdos_image.py", "spec", "-i", str(image)]
+    if dos_partition is not None:
+        args.extend(["--dos-partition", str(dos_partition)])
+    return run(args, cwd=ROOT).stdout.strip()
+
+
+def verify_installed(image: Path, dos_partition: int | None) -> None:
+    spec = image_spec(image, dos_partition)
     run(["mdir", "-i", spec, "::COMMAND.COM"])
     run(["mdir", "-i", spec, "::DOS"])
 
 
-def run_setup(image: Path, timings_scale: float) -> None:
+def run_setup(image: Path, timings_scale: float, dos_partition: int | None) -> None:
     disk1 = DISKS / "Disk 1 - Setup - 1.44mb.img"
     disk2 = DISKS / "Disk 2 - 1.44mb.img"
     disk3 = DISKS / "Disk 3 - 1.45mb.img"
@@ -188,7 +204,7 @@ def run_setup(image: Path, timings_scale: float) -> None:
         time.sleep(4 * timings_scale)
     finally:
         quit_qemu(proc)
-    verify_installed(image)
+    verify_installed(image, dos_partition)
 
 
 def run_mbr_repair(image: Path, timings_scale: float) -> None:
@@ -206,8 +222,10 @@ def run_mbr_repair(image: Path, timings_scale: float) -> None:
         quit_qemu(proc)
 
 
-def inject_tools(image: Path, packet_driver: str | None, usb_options: str) -> None:
+def inject_tools(image: Path, packet_driver: str | None, usb_options: str, dos_partition: int | None) -> None:
     args = ["scripts/inject-tools", "-i", str(image)]
+    if dos_partition is not None:
+        args.extend(["--dos-partition", str(dos_partition)])
     if packet_driver is None and (DISKS / "nic" / "NE2000.COM").is_file():
         args.extend(["--packet-driver", r"C:\PKTDRV\NE2000.COM 0x60 3 0x300"])
     elif packet_driver:
@@ -216,13 +234,14 @@ def inject_tools(image: Path, packet_driver: str | None, usb_options: str) -> No
     subprocess.run(args, cwd=ROOT, check=True)
 
 
-def boot_verify(image: Path, timings_scale: float) -> None:
+def boot_verify(image: Path, timings_scale: float, usb_options: str, dos_partition: int | None) -> None:
     proc = start_qemu(image, floppy=None, boot="c")
     try:
         time.sleep(6 * timings_scale)
-        # CONFIG.SYS uses USBASPI /W, so boot waits for Enter before the USB
-        # scan. Continue the boot without an attached USB device.
-        sendkey("ret")
+        if "/W" in usb_options.upper().split():
+            # CONFIG.SYS uses USBASPI /W, so boot waits for Enter before the USB
+            # scan. Continue the boot without an attached USB device.
+            sendkey("ret")
         time.sleep(8 * timings_scale)
         # A bootable DOS image should keep QEMU running. Host-side file checks
         # verify the installed files and injected config.
@@ -230,7 +249,7 @@ def boot_verify(image: Path, timings_scale: float) -> None:
             raise RuntimeError("QEMU exited during hard-disk boot verification")
     finally:
         quit_qemu(proc)
-    spec = f"{image}@@{SECTOR_OFFSET}"
+    spec = image_spec(image, dos_partition)
     run(["mdir", "-i", spec, "::USB"])
     run(["mdir", "-i", spec, "::MTCP"])
     run(["mdir", "-i", spec, "::PKZIP"])
@@ -252,6 +271,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="multiply sleeps for slower hosts",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=("blank", "plain", "compaq-reserved", "compaq-diagnostics", "compaq-f10"),
+        default=DEFAULT_LAYOUT,
+        help="partition layout to pass to scripts/create-image",
+    )
+    parser.add_argument(
+        "--diagnostics-size-mib",
+        type=int,
+        default=DEFAULT_DIAGNOSTICS_SIZE_MIB,
+        help="leading diagnostics/reserved area size for Compaq layouts",
+    )
+    parser.add_argument(
+        "--dos-partition",
+        type=int,
+        default=None,
+        help="explicit DOS partition number; by default the active FAT16 partition is used",
     )
     parser.add_argument(
         "--packet-driver",
@@ -282,16 +319,23 @@ def main() -> int:
     try:
         require_tools()
         if not args.skip_create:
-            create_image(image, args.force, args.size_mib, args.size_bytes)
+            create_image(
+                image,
+                args.force,
+                args.size_mib,
+                args.size_bytes,
+                args.layout,
+                args.diagnostics_size_mib,
+            )
         if not args.skip_setup:
             print(f"Installing MS-DOS 6.22 into {image}", flush=True)
-            run_setup(image, args.timings_scale)
+            run_setup(image, args.timings_scale, args.dos_partition)
             print("Writing MS-DOS MBR with FDISK /MBR", flush=True)
             run_mbr_repair(image, args.timings_scale)
         print("Injecting USB, PKZIP, mTCP, and CD-ROM support", flush=True)
-        inject_tools(image, args.packet_driver, args.usb_options)
+        inject_tools(image, args.packet_driver, args.usb_options, args.dos_partition)
         print("Boot-verifying final image", flush=True)
-        boot_verify(image, args.timings_scale)
+        boot_verify(image, args.timings_scale, args.usb_options, args.dos_partition)
         print(f"Automated install complete: {image}", flush=True)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"automate-install failed: {exc}", file=sys.stderr)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import re
 import shutil
@@ -22,8 +23,19 @@ DEFAULT_IMAGE = BUILD / "msdos622-cf-2047m.img"
 DEFAULT_USB_IMAGE = BUILD / "usb-stick-128m.img"
 DEFAULT_SIZE_MIB = 2047
 DEFAULT_SIZE_BYTES: int | None = None
+DEFAULT_LAYOUT = "plain"
+DEFAULT_DIAGNOSTICS_SIZE_MIB = 8
 DEFAULT_USB_SIZE_MIB = 128
 SECTOR_SIZE = 512
+COMPAT_HEADS = 255
+COMPAT_SECTORS_PER_TRACK = 63
+COMPAQ_F10_PARTITION = 3
+COMPAQ_F10_START_SECTOR = 63
+COMPAQ_F10_SECTORS = 16065
+COMPAQ_F10_DOS_START_SECTOR = COMPAQ_F10_START_SECTOR + COMPAQ_F10_SECTORS
+COMPAQ_F10_HEADS = 64
+COMPAQ_F10_SECTORS_PER_TRACK = 63
+FAT16_TYPES = {"04", "06", "0E"}
 REQUIRED_TOOLS = (
     "fdisk",
     "mcopy",
@@ -90,38 +102,144 @@ def create_non_sparse(path: Path, size_mib: int) -> None:
     create_non_sparse_bytes(path, size_mib * 1024 * 1024)
 
 
-def create_partition_table(path: Path) -> None:
-    # Leave a conventional 1 MiB gap. Type 06 is FAT16 over 32 MiB.
-    script = "label: dos\nunit: sectors\n\nstart=2048, type=06, bootable\n"
+def sectors_from_mib(size_mib: int) -> int:
+    return size_mib * 1024 * 1024 // SECTOR_SIZE
+
+
+def align_up(value: int, alignment: int) -> int:
+    return ((value + alignment - 1) // alignment) * alignment
+
+
+def chs_bytes(cylinder: int, head: int, sector: int) -> bytes:
+    if not 0 <= cylinder <= 1023:
+        raise RuntimeError(f"CHS cylinder out of range: {cylinder}")
+    if not 0 <= head <= 255:
+        raise RuntimeError(f"CHS head out of range: {head}")
+    if not 1 <= sector <= 63:
+        raise RuntimeError(f"CHS sector out of range: {sector}")
+    return bytes([head, sector | ((cylinder >> 2) & 0xC0), cylinder & 0xFF])
+
+
+def lba_to_chs(lba: int, heads: int, sectors_per_track: int) -> bytes:
+    cylinder, offset = divmod(lba, heads * sectors_per_track)
+    head, sector_offset = divmod(offset, sectors_per_track)
+    return chs_bytes(cylinder, head, sector_offset + 1)
+
+
+def patch_mbr_entry_chs(path: Path, partition: int, start_chs: bytes, end_chs: bytes) -> None:
+    if not 1 <= partition <= 4:
+        raise RuntimeError(f"Invalid MBR partition number: {partition}")
+    entry_offset = 446 + (partition - 1) * 16
+    with path.open("r+b") as handle:
+        handle.seek(entry_offset + 1)
+        handle.write(start_chs)
+        handle.seek(entry_offset + 5)
+        handle.write(end_chs)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def patch_compaq_f10_chs(path: Path) -> None:
+    # The Deskpro-created F10 partition uses 64 heads and 63 sectors/track.
+    # sfdisk writes CHS fields using modern 255-head translation, which leaves
+    # the DOS partition bootable in QEMU but not on the Deskpro BIOS.
+    dos_end = path.stat().st_size // SECTOR_SIZE - 1
+    patch_mbr_entry_chs(
+        path,
+        1,
+        lba_to_chs(COMPAQ_F10_DOS_START_SECTOR, COMPAQ_F10_HEADS, COMPAQ_F10_SECTORS_PER_TRACK),
+        lba_to_chs(dos_end, COMPAQ_F10_HEADS, COMPAQ_F10_SECTORS_PER_TRACK),
+    )
+
+
+def create_partition_table(path: Path, layout: str, diagnostics_size_mib: int) -> None:
+    # Leave a conventional 1 MiB gap before the first partition.
+    first_start = 2048
+    if layout == "blank":
+        return
+    if layout.startswith("compaq-") and diagnostics_size_mib < 2:
+        raise RuntimeError("Compaq layouts require at least 2 MiB of diagnostics/reserved space")
+    diagnostics_sectors = sectors_from_mib(diagnostics_size_mib)
+    compat_cylinder_sectors = COMPAT_HEADS * COMPAT_SECTORS_PER_TRACK
+    if layout == "plain":
+        script = "label: dos\nunit: sectors\n\nstart=2048, type=06, bootable\n"
+    elif layout == "compaq-reserved":
+        # Leave unpartitioned leading space for Compaq Diagnostics to create
+        # its own type 12h partition later. Keep DOS active after that gap.
+        # Old Compaq tools inspect CHS geometry, so start DOS on a cylinder
+        # boundary instead of a modern 1 MiB-style offset.
+        dos_start = align_up(first_start + diagnostics_sectors, compat_cylinder_sectors)
+        script = f"label: dos\nunit: sectors\n\nstart={dos_start}, type=06, bootable\n"
+    elif layout == "compaq-diagnostics":
+        # Pre-create a leading Compaq diagnostics partition, then DOS.
+        dos_start = align_up(first_start + diagnostics_sectors, compat_cylinder_sectors)
+        script = (
+            "label: dos\nunit: sectors\n\n"
+            f"start={first_start}, size={diagnostics_sectors}, type=12\n"
+            f"start={dos_start}, type=06, bootable\n"
+        )
+    elif layout == "compaq-f10":
+        # Exact layout observed after Compaq Diagnostics created the F10
+        # partition on a blank Deskpro CF card. The diagnostics partition is
+        # deliberately MBR entry 3, not entry 1.
+        script = (
+            "label: dos\nunit: sectors\n\n"
+            f"{path}3 : start={COMPAQ_F10_START_SECTOR}, "
+            f"size={COMPAQ_F10_SECTORS}, type=12\n"
+            f"{path}1 : start={COMPAQ_F10_DOS_START_SECTOR}, type=06, bootable\n"
+        )
+    else:
+        raise RuntimeError(f"Unknown layout: {layout}")
     run(["sfdisk", str(path)], input_text=script)
+    if layout == "compaq-f10":
+        patch_compaq_f10_chs(path)
 
 
 def create_fat16_image(path: Path, size_mib: int, label: str) -> None:
     create_non_sparse(path, size_mib)
-    create_partition_table(path)
+    create_partition_table(path, DEFAULT_LAYOUT, DEFAULT_DIAGNOSTICS_SIZE_MIB)
     run(["mformat", "-i", image_spec(path), "-v", label[:11], "::"])
 
 
-def partition_start_sector(raw_image: Path) -> int:
-    result = run(["fdisk", "-l", str(raw_image)])
-    raw = str(raw_image)
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        if parts[0] == f"{raw}1" and parts[1] == "*" and parts[2].isdigit():
-            return int(parts[2])
-        if parts[0] == f"{raw}1" and parts[1].isdigit():
-            return int(parts[1])
-        if parts[0].endswith("1") and parts[1] == "*" and parts[2].isdigit():
-            return int(parts[2])
-        if parts[0].endswith("1") and parts[1].isdigit():
-            return int(parts[1])
-    raise RuntimeError(f"Could not determine first partition start sector in {raw_image}")
+def normalize_partition_type(value: str) -> str:
+    return value.upper().removeprefix("0X").zfill(2)
 
 
-def image_spec(raw_image: Path) -> str:
-    return f"{raw_image}@@{partition_start_sector(raw_image) * SECTOR_SIZE}"
+def partition_number(node: str) -> int | None:
+    match = re.search(r"(\d+)$", node)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def partition_table(raw_image: Path) -> list[dict[str, object]]:
+    result = run(["sfdisk", "--json", str(raw_image)])
+    return json.loads(result.stdout)["partitiontable"].get("partitions", [])
+
+
+def partition_start_sector(raw_image: Path, dos_partition: int | None = None) -> int:
+    partitions = partition_table(raw_image)
+    if dos_partition is not None:
+        for partition in partitions:
+            if partition_number(str(partition.get("node", ""))) == dos_partition:
+                return int(partition["start"])
+        raise RuntimeError(f"Could not find partition {dos_partition} in {raw_image}")
+
+    fat16 = [
+        partition
+        for partition in partitions
+        if normalize_partition_type(str(partition.get("type", ""))) in FAT16_TYPES
+    ]
+    for partition in fat16:
+        if partition.get("bootable"):
+            return int(partition["start"])
+    if fat16:
+        return int(fat16[0]["start"])
+    raise RuntimeError(f"Could not determine DOS FAT16 partition start sector in {raw_image}")
+
+
+def image_spec(raw_image: Path, dos_partition: int | None = None) -> str:
+    return f"{raw_image}@@{partition_start_sector(raw_image, dos_partition) * SECTOR_SIZE}"
 
 
 def dos_path(*parts: str) -> str:
@@ -258,8 +376,10 @@ def stage_files(args: argparse.Namespace) -> Path:
         run(["mcopy", "-s", "-i", str(pkzip_img), "::", str(stage / "PKZIP")])
 
     cdrom_img = DISKS / "cdrom.img"
-    if cdrom_img.is_file():
+    if args.cdrom in ("auto", "always") and cdrom_img.is_file():
         run(["mcopy", "-i", str(cdrom_img), "::OAKCDROM.SYS", str(stage / "DOS" / "OAKCDROM.SYS")])
+    elif args.cdrom == "always":
+        raise FileNotFoundError(cdrom_img)
 
     nic_dir = Path(args.nic_dir)
     if nic_dir.is_dir():
@@ -274,7 +394,7 @@ def inject(args: argparse.Namespace) -> None:
     image = Path(args.image).resolve()
     if not image.is_file():
         raise FileNotFoundError(image)
-    spec = image_spec(image)
+    spec = image_spec(image, args.dos_partition)
     stage = stage_files(args)
 
     for name in ("USB", "MTCP", "PKZIP", "PKTDRV", "DOS"):
@@ -374,9 +494,10 @@ def cmd_create(args: argparse.Namespace) -> None:
     size_bytes = args.size_bytes if args.size_bytes is not None else args.size_mib * 1024 * 1024
     print(f"Creating non-sparse {size_bytes} byte image at {rel(output)}")
     create_non_sparse_bytes(output, size_bytes)
-    create_partition_table(output)
+    create_partition_table(output, args.layout, args.diagnostics_size_mib)
     run(["qemu-img", "info", str(output)])
-    print("Image created. Boot QEMU from MS-DOS Disk 1 and install to C:.")
+    print(f"Image created with {args.layout} layout.")
+    print("Boot QEMU from MS-DOS Disk 1 and install to C:.")
     print("After setup, run FDISK /MBR from Setup Disk 1 if C: does not boot.")
 
 
@@ -464,7 +585,46 @@ def cmd_restore(args: argparse.Namespace) -> None:
 def cmd_info(args: argparse.Namespace) -> None:
     image = Path(args.image).resolve()
     print(run(["fdisk", "-l", str(image)]).stdout)
-    print(f"mtools image spec: {image_spec(image)}")
+    print(f"mtools image spec: {image_spec(image, args.dos_partition)}")
+
+
+def cmd_spec(args: argparse.Namespace) -> None:
+    image = Path(args.image).resolve()
+    print(image_spec(image, args.dos_partition))
+
+
+def cmd_copy_compaq_f10(args: argparse.Namespace) -> None:
+    image = Path(args.image).resolve()
+    partition_image = Path(args.partition_image).resolve()
+    if not image.is_file():
+        raise FileNotFoundError(image)
+    if not partition_image.is_file():
+        raise FileNotFoundError(partition_image)
+
+    max_size = COMPAQ_F10_SECTORS * SECTOR_SIZE
+    source_size = partition_image.stat().st_size
+    if source_size > max_size:
+        raise RuntimeError(
+            f"{partition_image} is {source_size} bytes, larger than "
+            f"the Compaq F10 partition size {max_size} bytes"
+        )
+
+    with partition_image.open("rb") as src, image.open("r+b") as dest:
+        dest.seek(COMPAQ_F10_START_SECTOR * SECTOR_SIZE)
+        shutil.copyfileobj(src, dest, length=1024 * 1024)
+        remaining = max_size - source_size
+        zero = b"\0" * (1024 * 1024)
+        while remaining:
+            chunk = zero[: min(len(zero), remaining)]
+            dest.write(chunk)
+            remaining -= len(chunk)
+        dest.flush()
+        os.fsync(dest.fileno())
+
+    print(
+        f"Copied {rel(partition_image)} to partition {COMPAQ_F10_PARTITION} "
+        f"of {rel(image)} at sector {COMPAQ_F10_START_SECTOR}"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -483,6 +643,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SIZE_BYTES,
         help="exact raw image size in bytes; overrides --size-mib",
     )
+    create.add_argument(
+        "--layout",
+        choices=("blank", "plain", "compaq-reserved", "compaq-diagnostics", "compaq-f10"),
+        default=DEFAULT_LAYOUT,
+        help=(
+            "partition layout: blank creates no partition table; "
+            "plain creates one FAT16 partition; "
+            "compaq-reserved leaves leading free space for Compaq Diagnostics; "
+            "compaq-diagnostics pre-creates a type 12h partition; "
+            "compaq-f10 recreates the observed Deskpro F10 partition layout"
+        ),
+    )
+    create.add_argument(
+        "--diagnostics-size-mib",
+        type=int,
+        default=DEFAULT_DIAGNOSTICS_SIZE_MIB,
+        help="leading diagnostics/reserved area size for Compaq layouts",
+    )
     create.add_argument("-f", "--force", action="store_true")
     create.set_defaults(func=cmd_create)
 
@@ -495,6 +673,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     inject_parser = sub.add_parser("inject", help="inject USB, PKZIP, mTCP, CD-ROM, and config files")
     inject_parser.add_argument("-i", "--image", default=str(DEFAULT_IMAGE))
+    inject_parser.add_argument(
+        "--dos-partition",
+        type=int,
+        default=None,
+        help="explicit DOS partition number; by default the active FAT16 partition is used",
+    )
     inject_parser.add_argument("--nic-dir", default=str(DISKS / "nic"))
     inject_parser.add_argument(
         "--packet-driver",
@@ -505,6 +689,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--usb-options",
         default="/W /V",
         help=r"Options for USBASPI.SYS; use /V on real hardware to avoid the boot pause",
+    )
+    inject_parser.add_argument(
+        "--cdrom",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="whether to inject OAKCDROM.SYS/MSCDEX when disks/cdrom.img is present",
     )
     inject_parser.set_defaults(func=inject)
 
@@ -521,7 +711,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     info = sub.add_parser("info", help="show partition information for an image")
     info.add_argument("-i", "--image", default=str(DEFAULT_IMAGE))
+    info.add_argument("--dos-partition", type=int, default=None)
     info.set_defaults(func=cmd_info)
+
+    spec = sub.add_parser("spec", help="print the mtools image spec for the DOS partition")
+    spec.add_argument("-i", "--image", default=str(DEFAULT_IMAGE))
+    spec.add_argument("--dos-partition", type=int, default=None)
+    spec.set_defaults(func=cmd_spec)
+
+    copy_f10 = sub.add_parser(
+        "copy-compaq-f10",
+        help="copy a saved Compaq F10 diagnostics partition image into a raw disk image",
+    )
+    copy_f10.add_argument("-i", "--image", required=True)
+    copy_f10.add_argument("--partition-image", required=True)
+    copy_f10.set_defaults(func=cmd_copy_compaq_f10)
 
     return parser
 

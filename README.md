@@ -106,6 +106,108 @@ scripts/create-image --force \
   -o build/msdos622-cf-1954m.img
 ```
 
+The default layout is `plain`: one active FAT16 partition starting after the
+usual 1 MiB gap. Other layouts are available for machines that need vendor
+setup/diagnostics space:
+
+```sh
+scripts/create-image --force \
+  --size-bytes 2048901120 \
+  --layout blank \
+  -o build/blank-2048901120.img
+```
+
+`blank` creates an exact-size zero-filled disk image with no partition table.
+Use this on a spare CF when you want the target machine's own setup utility to
+initialize the disk from scratch. After the machine creates its vendor
+diagnostics partition, inspect the CF on the host with `fdisk -x` and
+`sfdisk -d` before building an MS-DOS image around that layout.
+
+```sh
+scripts/create-image --force \
+  --size-bytes 2048901120 \
+  --layout compaq-reserved \
+  --diagnostics-size-mib 8 \
+  -o build/msdos622-cf-compaq-reserved.img
+```
+
+`compaq-reserved` leaves diagnostics space unpartitioned at the beginning of the
+disk and creates the active DOS FAT16 partition after that. The DOS start sector
+is rounded up to an old-PC cylinder boundary so Compaq diagnostics sees clean
+space before DOS. With `--diagnostics-size-mib 8`, DOS starts at sector `32130`
+(`16,450,560` bytes), CHS `2/0/1`. Use this when booting the Compaq Diagnostics
+disk and letting it create the type `12h` diagnostics partition itself.
+
+```sh
+scripts/create-image --force \
+  --size-bytes 2048901120 \
+  --layout compaq-diagnostics \
+  --diagnostics-size-mib 8 \
+  -o build/msdos622-cf-compaq-diag.img
+```
+
+`compaq-diagnostics` pre-creates an 8 MiB type `12h` Compaq diagnostics
+partition followed by the active DOS FAT16 partition. This is useful for
+experiments, but the Compaq utility is the safest way to populate or resize its
+own diagnostics partition.
+
+After allowing the Compaq Diagnostics utility to initialize a blank 2 GB CF, the
+Deskpro created this exact F10 diagnostics layout:
+
+```text
+/dev/sdb3 : start=63, size=16065, type=12
+```
+
+Use `compaq-f10` to recreate that partition table shape:
+
+```sh
+scripts/create-image --force \
+  --size-bytes 2048901120 \
+  --layout compaq-f10 \
+  -o build/msdos622-cf-compaq-f10.img
+```
+
+This creates:
+
+- partition 3: type `12h` Compaq diagnostics, start sector `63`, size `16065`
+- partition 1: active FAT16 DOS, start sector `16128`
+
+The Deskpro uses 64-head, 63-sector CHS geometry for this disk. The
+`compaq-f10` layout therefore patches the DOS partition CHS start to `4/0/1`
+even though modern tools would normally write a 255-head translation.
+
+Capture the working diagnostics partition from a CF initialized by the Compaq:
+
+```sh
+sudo dd if=/dev/sdb3 of=images/compaq-setup/deskpro-f10-partition.img bs=512 status=progress
+sudo chown "$USER:$USER" images/compaq-setup/deskpro-f10-partition.img
+```
+
+After creating or rebuilding a `compaq-f10` image, copy that partition image into
+partition 3 before writing the image to CF:
+
+```sh
+python3 scripts/msdos_image.py copy-compaq-f10 \
+  -i build/msdos622-cf-compaq-f10.img \
+  --partition-image images/compaq-setup/deskpro-f10-partition.img
+```
+
+The tools normally auto-detect the active FAT16 partition for mtools. If needed,
+pass `--dos-partition N` to `scripts/image-info`, `scripts/inject-tools`, or
+`scripts/automate-install`.
+
+For a full Compaq-style rebuild on the measured CF size:
+
+```sh
+scripts/automate-install --force \
+  --size-bytes 2048901120 \
+  --layout compaq-reserved \
+  --diagnostics-size-mib 8 \
+  --usb-options /V \
+  --packet-driver '' \
+  -o build/msdos622-cf-1954m-compaq.img
+```
+
 Install MS-DOS 6.22 in QEMU:
 
 ```sh
