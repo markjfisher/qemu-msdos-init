@@ -16,6 +16,7 @@ DEFAULT_USER = os.environ.get("DOS_FTP_USER", "ftp")
 DEFAULT_PASS = os.environ.get("DOS_FTP_PASS", "user@example.com")
 DEFAULT_INCOMING = os.environ.get("DOS_FTP_INCOMING", "/incoming")
 DEFAULT_FUJINET_SYS = WORKSPACE / "repos" / "fujinet-msdos" / "sys" / "fujinet.sys"
+DEFAULT_NIODUMP = WORKSPACE / "repos" / "fujinet-msdos" / "niodump" / "niodump.exe"
 DEFAULT_NIO_APPS_BIN = WORKSPACE / "repos" / "nio-apps" / "build" / "msdos" / "bin"
 
 
@@ -143,10 +144,12 @@ def command_push_fujinet(args: argparse.Namespace) -> None:
 
 def command_push_apps(args: argparse.Namespace) -> None:
     source_dir = Path(args.source_dir).resolve()
+    extra_files = [Path(path).resolve() for path in args.extra]
     if not source_dir.is_dir():
         raise SystemExit(f"Apps directory not found: {source_dir}")
 
     files = sorted(path for path in source_dir.iterdir() if path.is_file())
+    files.extend(path for path in extra_files if path.is_file())
     if not files:
         raise SystemExit(f"No files found in apps directory: {source_dir}")
 
@@ -214,6 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     apps = sub.add_parser("push-apps", parents=[command_connection], help="upload nio-apps MS-DOS build output to C:\\FNAPPS")
     apps.add_argument("--source-dir", default=str(DEFAULT_NIO_APPS_BIN))
+    apps.add_argument("--extra", action="append", default=[str(DEFAULT_NIODUMP)], help="extra file to upload with apps; may be repeated")
     apps.add_argument("--remote-dir", default="/FNAPPS")
     apps.set_defaults(func=command_push_apps)
 
