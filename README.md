@@ -87,6 +87,18 @@ The source defaults to:
 ../fujinet-msdos/sys/fujinet.sys
 ```
 
+Push all current MS-DOS nio-apps build outputs to `C:\FNAPPS`:
+
+```sh
+scripts/push-nio-apps --user root --password user@example.com
+```
+
+This uploads regular files from:
+
+```text
+../nio-apps/build/msdos/bin
+```
+
 If the FTP server is rooted somewhere other than `C:\`, pass explicit remote
 paths:
 

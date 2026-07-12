@@ -16,6 +16,7 @@ DEFAULT_USER = os.environ.get("DOS_FTP_USER", "ftp")
 DEFAULT_PASS = os.environ.get("DOS_FTP_PASS", "user@example.com")
 DEFAULT_INCOMING = os.environ.get("DOS_FTP_INCOMING", "/incoming")
 DEFAULT_FUJINET_SYS = WORKSPACE / "repos" / "fujinet-msdos" / "sys" / "fujinet.sys"
+DEFAULT_NIO_APPS_BIN = WORKSPACE / "repos" / "nio-apps" / "build" / "msdos" / "bin"
 
 
 def normalise_remote(path: str) -> str:
@@ -140,6 +141,26 @@ def command_push_fujinet(args: argparse.Namespace) -> None:
     print(f"{source} -> {normalise_remote(args.remote)}")
 
 
+def command_push_apps(args: argparse.Namespace) -> None:
+    source_dir = Path(args.source_dir).resolve()
+    if not source_dir.is_dir():
+        raise SystemExit(f"Apps directory not found: {source_dir}")
+
+    files = sorted(path for path in source_dir.iterdir() if path.is_file())
+    if not files:
+        raise SystemExit(f"No files found in apps directory: {source_dir}")
+
+    remote_dir = normalise_remote(args.remote_dir).rstrip("/")
+    with connect(args) as ftp:
+        ensure_remote_dir(ftp, remote_dir)
+        for source in files:
+            remote = f"{remote_dir}/{source.name.upper()}"
+            upload_file(ftp, source, remote, crlf=False)
+            print(f"{source} -> {remote}")
+
+    print(f"Uploaded {len(files)} file(s) to {remote_dir}")
+
+
 def add_connection_args(parser: argparse.ArgumentParser, *, defaults: bool = True) -> None:
     default = None if defaults else argparse.SUPPRESS
     parser.add_argument("--host", default=DEFAULT_HOST if defaults else default)
@@ -190,6 +211,11 @@ def build_parser() -> argparse.ArgumentParser:
     fn.add_argument("--source", default=str(DEFAULT_FUJINET_SYS))
     fn.add_argument("--remote", default="/FUJINET/FUJINET.SYS")
     fn.set_defaults(func=command_push_fujinet)
+
+    apps = sub.add_parser("push-apps", parents=[command_connection], help="upload nio-apps MS-DOS build output to C:\\FNAPPS")
+    apps.add_argument("--source-dir", default=str(DEFAULT_NIO_APPS_BIN))
+    apps.add_argument("--remote-dir", default="/FNAPPS")
+    apps.set_defaults(func=command_push_apps)
 
     return parser
 
