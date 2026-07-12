@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+python3 scripts/dos_ftp.py put --crlf host/dos-root/AUTOEXEC.BAT /incoming/AUTOEXEC.BAT "$@"
+python3 scripts/dos_ftp.py put --crlf host/dos-root/CONFIG.SYS /incoming/CONFIG.SYS "$@"

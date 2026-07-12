@@ -25,6 +25,76 @@ Check the local setup:
 scripts/check
 ```
 
+## Real-Hardware FTP Workflow
+
+After the Compaq boots with mTCP networking, run the FTP server on DOS:
+
+```bat
+FTPD
+```
+
+The host-side helpers default to `MSDOS622.home`, user `ftp`, and password
+`user@example.com`. Override them with environment variables when needed:
+
+```sh
+export DOS_FTP_HOST=MSDOS622.home
+export DOS_FTP_USER=ftp
+export DOS_FTP_PASS=user@example.com
+```
+
+List files or push one file into the FTP user's `incoming` directory:
+
+```sh
+scripts/dos-ftp ls
+scripts/dos-ftp put README.md
+scripts/dos-ftp get /incoming/README.md build/from-dos/README.md
+```
+
+For the current sandboxed FTP user, stage editable boot files and the Fujinet
+driver under `INCOMING`:
+
+```sh
+scripts/stage-dos-config
+scripts/stage-fujinet-sys
+```
+
+Then copy them into place from DOS after inspection. The staged config files are
+converted to DOS CRLF endings before upload.
+
+If the FTP user is rooted at `C:\`, push editable host-side boot files directly
+to the DOS root:
+
+```sh
+scripts/push-dos-config --user root --password user@example.com
+```
+
+Edit the host copies here:
+
+```text
+host/dos-root/AUTOEXEC.BAT
+host/dos-root/CONFIG.SYS
+```
+
+Push the current Fujinet MS-DOS driver build to `C:\FUJINET\FUJINET.SYS`:
+
+```sh
+scripts/push-fujinet-sys --user root --password user@example.com
+```
+
+The source defaults to:
+
+```text
+../fujinet-msdos/sys/fujinet.sys
+```
+
+If the FTP server is rooted somewhere other than `C:\`, pass explicit remote
+paths:
+
+```sh
+scripts/dos-ftp put --crlf host/dos-root/AUTOEXEC.BAT /AUTOEXEC.BAT
+scripts/push-fujinet-sys --remote /FUJINET/FUJINET.SYS
+```
+
 ## Local Disk Files
 
 The `disks/` directory is gitignored. Put these files there:
