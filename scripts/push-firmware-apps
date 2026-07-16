@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+WORKSPACE="$(cd -- "$REPO_DIR/../.." && pwd)"
+
+# shellcheck source=/dev/null
+source "$WORKSPACE/scripts/env.sh"
+
+: "${DOS_FTP_USER:=root}"
+export DOS_FTP_USER
+
+build=true
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    --help|-h)
+      exec python3 "$REPO_DIR/scripts/dos_ftp.py" push-firmware-apps "$@"
+      ;;
+    --no-build)
+      build=false
+      ;;
+    *)
+      args+=("$arg")
+      ;;
+  esac
+done
+
+if [ "$build" = true ]; then
+  if ! command -v nasm >/dev/null 2>&1; then
+    echo "Missing dependency: nasm is required to build FMALL.COM and FRESET.COM." >&2
+    echo "Install nasm, or rerun with --no-build to upload an existing $FUJINET_MSDOS/builds directory." >&2
+    exit 1
+  fi
+  make -C "$FUJINET_MSDOS" FUJINET_TRANSPORT= builds
+fi
+
+exec python3 "$REPO_DIR/scripts/dos_ftp.py" push-firmware-apps "${args[@]}"

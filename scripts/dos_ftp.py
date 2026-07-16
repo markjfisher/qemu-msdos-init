@@ -15,9 +15,11 @@ DEFAULT_HOST = os.environ.get("DOS_FTP_HOST", "MSDOS622.home")
 DEFAULT_USER = os.environ.get("DOS_FTP_USER", "ftp")
 DEFAULT_PASS = os.environ.get("DOS_FTP_PASS", "user@example.com")
 DEFAULT_INCOMING = os.environ.get("DOS_FTP_INCOMING", "/incoming")
-DEFAULT_FUJINET_SYS = WORKSPACE / "repos" / "fujinet-msdos" / "sys" / "fujinet.sys"
+DEFAULT_FUJINET_SYS = WORKSPACE / "repos" / "fujinet-nio-msdos" / "build" / "dos" / "fujinet.sys"
+DEFAULT_FUJINET_SYS_LEGACY = WORKSPACE / "repos" / "fujinet-msdos" / "sys" / "fujinet.sys"
 DEFAULT_NIODUMP = WORKSPACE / "repos" / "fujinet-msdos" / "niodump" / "niodump.exe"
 DEFAULT_NIO_APPS_BIN = WORKSPACE / "repos" / "nio-apps" / "build" / "msdos" / "bin"
+DEFAULT_FIRMWARE_APPS_DIR = WORKSPACE / "repos" / "fujinet-msdos" / "builds"
 
 
 def normalise_remote(path: str) -> str:
@@ -148,7 +150,11 @@ def command_push_apps(args: argparse.Namespace) -> None:
     if not source_dir.is_dir():
         raise SystemExit(f"Apps directory not found: {source_dir}")
 
-    files = sorted(path for path in source_dir.iterdir() if path.is_file())
+    extensions = {ext.lower() for ext in getattr(args, "extensions", [])}
+    files = sorted(
+        path for path in source_dir.iterdir()
+        if path.is_file() and (not extensions or path.suffix.lower() in extensions)
+    )
     files.extend(path for path in extra_files if path.is_file())
     if not files:
         raise SystemExit(f"No files found in apps directory: {source_dir}")
@@ -210,16 +216,28 @@ def build_parser() -> argparse.ArgumentParser:
     cfg.add_argument("--remote-config", default="/CONFIG.SYS")
     cfg.set_defaults(func=command_push_config)
 
-    fn = sub.add_parser("push-fujinet", parents=[command_connection], help="upload fujinet-msdos/sys/fujinet.sys")
+    fn = sub.add_parser("push-fujinet", parents=[command_connection], help="upload fujinet-nio-msdos/build/dos/fujinet.sys")
     fn.add_argument("--source", default=str(DEFAULT_FUJINET_SYS))
     fn.add_argument("--remote", default="/FUJINET/FUJINET.SYS")
     fn.set_defaults(func=command_push_fujinet)
+
+    fn_legacy = sub.add_parser("push-fujinet-legacy", parents=[command_connection], help="upload fujinet-msdos/sys/fujinet.sys")
+    fn_legacy.add_argument("--source", default=str(DEFAULT_FUJINET_SYS_LEGACY))
+    fn_legacy.add_argument("--remote", default="/FUJINET/FUJINET.SYS")
+    fn_legacy.set_defaults(func=command_push_fujinet)
 
     apps = sub.add_parser("push-apps", parents=[command_connection], help="upload nio-apps MS-DOS build output to C:\\FNAPPS")
     apps.add_argument("--source-dir", default=str(DEFAULT_NIO_APPS_BIN))
     apps.add_argument("--extra", action="append", default=[str(DEFAULT_NIODUMP)], help="extra file to upload with apps; may be repeated")
     apps.add_argument("--remote-dir", default="/FNAPPS")
-    apps.set_defaults(func=command_push_apps)
+    apps.set_defaults(func=command_push_apps, extensions=[])
+
+    firmware_apps = sub.add_parser("push-firmware-apps", parents=[command_connection], help="upload fujinet-msdos firmware apps to C:\\FNOLD")
+    firmware_apps.add_argument("--source-dir", default=str(DEFAULT_FIRMWARE_APPS_DIR))
+    firmware_apps.add_argument("--extra", action="append", default=[], help="extra file to upload with apps; may be repeated")
+    firmware_apps.add_argument("--remote-dir", default="/FNOLD")
+    firmware_apps.add_argument("--extensions", nargs="+", default=[".exe", ".com"], help="file extensions to upload from source-dir")
+    firmware_apps.set_defaults(func=command_push_apps)
 
     return parser
 
